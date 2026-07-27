@@ -3,11 +3,14 @@ import { UserService } from "./user";
 import config, { TARGET_MODELS, PROMPT_STYLES } from "@/lib/config";
 
 export const AIService = {
-  async generatePromptRefinement(userId, sessionId, userMessage, targetModelId, promptStyleId, mode = "refinement", generatorModel = "google/gemini-2.5-flash") {
-    const cost = config.ai.model.creditCost; // 4 credits
+  async generatePromptRefinement(userId, sessionId, userMessage, targetModelId, promptStyleId, mode = "refinement", generatorModel = "google/gemini-2.5-flash", customApiKey = null) {
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
+    const cost = isUsingCustomKey ? 0 : config.ai.model.creditCost; // 4 credits
 
-    // 1. Deduct credits first
-    await UserService.deductCredits(userId, cost);
+    // 1. Deduct credits if not using custom key
+    if (!isUsingCustomKey && cost > 0) {
+      await UserService.deductCredits(userId, cost);
+    }
 
     const targetModel = TARGET_MODELS.find(m => m.id === targetModelId) || TARGET_MODELS[0];
     const promptStyle = PROMPT_STYLES.find(s => s.id === promptStyleId) || PROMPT_STYLES[0];
@@ -18,7 +21,7 @@ export const AIService = {
       orderBy: { createdAt: "asc" },
     });
 
-    const apiKey = config.ai.apiKey;
+    const apiKey = isUsingCustomKey ? customApiKey.trim() : config.ai.apiKey;
     if (!apiKey || apiKey.includes("your_") || apiKey.trim() === "") {
       console.warn("MU_API_KEY is not configured or invalid. Falling back to local Mock Prompt Architect refinement.");
       const request_id = `mock_${mode === "normal" ? "normal_" : ""}${Date.now()}`;
@@ -170,7 +173,7 @@ Respond strictly using the required JSON format:`;
     }
   },
 
-  async checkStatus(requestId) {
+  async checkStatus(requestId, customApiKey = null) {
     const message = await prisma.promptMessage.findUnique({
       where: { requestId }
     });
@@ -184,6 +187,8 @@ Respond strictly using the required JSON format:`;
     if (message.status === "failed") {
       return { status: "failed", error: "Generation failed" };
     }
+
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
 
     // Check if it's a mock request (starts with 'mock_')
     if (requestId && requestId.startsWith("mock_")) {
@@ -245,7 +250,7 @@ Deliver an exhaustive, ready-to-run execution plan tailored to the user's detail
       return { status: "completed", message: updated };
     }
 
-    const apiKey = config.ai.apiKey;
+    const apiKey = (customApiKey && customApiKey.trim().length > 0) ? customApiKey.trim() : config.ai.apiKey;
     if (!apiKey) throw new Error("MU_API_KEY is not configured");
 
     try {
@@ -328,8 +333,10 @@ Deliver an exhaustive, ready-to-run execution plan tailored to the user's detail
           }
         });
 
-        // Refund credits
-        await UserService.addCredits(message.userId, cost);
+        // Refund credits if not using custom key
+        if (!isUsingCustomKey) {
+          await UserService.addCredits(message.userId, config.ai.model.creditCost);
+        }
         return { status: "failed", error: errorMsg };
       }
     } catch (e) {

@@ -15,9 +15,12 @@ export async function GET(req) {
     const sessionId = searchParams.get("sessionId");
     const checkRequestId = searchParams.get("requestId");
 
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || session.user.customApiKey || null;
+
     // Case 1: Check active polling status for a single request
     if (checkRequestId) {
-      const statusData = await AIService.checkStatus(checkRequestId);
+      const statusData = await AIService.checkStatus(checkRequestId, customApiKey);
       return NextResponse.json(statusData);
     }
 
@@ -33,7 +36,7 @@ export async function GET(req) {
         messages.map(async (msg) => {
           if (msg.status === "processing" && msg.requestId) {
             try {
-              const res = await AIService.checkStatus(msg.requestId);
+              const res = await AIService.checkStatus(msg.requestId, customApiKey);
               if (res && res.message) {
                 return res.message;
               }
@@ -67,23 +70,31 @@ export async function POST(req) {
     const session = await getServerSession(authOptions);
     if (!session?.user) return new NextResponse("Unauthorized", { status: 401 });
 
-    const { message, sessionId, targetModel, promptStyle, mode, generatorModel } = await req.json();
+    const body = await req.json();
+    const { message, sessionId, targetModel, promptStyle, mode, generatorModel } = body;
 
     if (!message || message.trim() === "") {
       return new NextResponse("Message content is required", { status: 400 });
     }
 
-    const cost = config.ai.model.creditCost; // 4 credits
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { credits: true },
-    });
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || body.customApiKey || session.user.customApiKey || null;
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
 
-    if (!user || user.credits < cost) {
-      return new NextResponse(
-        `Insufficient credits. Required: ${cost}, balance: ${user?.credits ?? 0}`,
-        { status: 400 }
-      );
+    const cost = isUsingCustomKey ? 0 : config.ai.model.creditCost; // 4 credits
+
+    if (!isUsingCustomKey) {
+      const user = await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { credits: true },
+      });
+
+      if (!user || user.credits < cost) {
+        return new NextResponse(
+          `Insufficient credits. Required: ${cost}, balance: ${user?.credits ?? 0}`,
+          { status: 400 }
+        );
+      }
     }
 
     let activeSessionId = sessionId;
@@ -108,7 +119,8 @@ export async function POST(req) {
       targetModel || "chatgpt",
       promptStyle || "professional",
       mode || "refinement",
-      generatorModel || "google/gemini-2.5-flash"
+      generatorModel || "google/gemini-2.5-flash",
+      customApiKey
     );
 
     // Touch the session to update its updatedAt field
